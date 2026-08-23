@@ -1,0 +1,31 @@
+**/__pycache__
+*.egg-info
+data.json
+config.yml
+
+# coverage based artifacts
+htmlcov
+.coverage
+coverage.lcov
+
+# build specific artifacts
+dist
+
+# Virtual environments
+venv
+.venv
+
+# IDE-specific directories
+.vscode
+.idea
+*~
+
+# Test/lint caches
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Frontend
+frontend/node_modules
+frontend/.webpack-cache
+platzky_telegram_notifier/static/main.js

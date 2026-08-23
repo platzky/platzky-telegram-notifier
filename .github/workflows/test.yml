@@ -1,0 +1,22 @@
+name: Test
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.10"
+    - name: Install Poetry
+      run: pip install poetry==2.0.1
+    - name: Install dependencies
+      run: poetry install
+    - name: Run tests with coverage
+      run: make coverage
+    - name: Coverage summary
+      run: poetry run coverage report --format=markdown >> $GITHUB_STEP_SUMMARY

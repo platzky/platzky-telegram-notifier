@@ -1,0 +1,89 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "platzky_telegram_notifier"
+version = "0.1.0"
+description = "Platzky plugin for sending notifications to Telegram"
+authors = ["Krzysztof Kołodziński"]
+license = "MIT"
+readme = "README.md"
+# Force the gitignored build outputs into the package (compiled translations, and the
+# frontend bundle when present). Two non-obvious requirements, both easy to get wrong:
+#   * format must list "wheel": a bare include defaults to sdist-only, so the files
+#     would be missing from the installed wheel.
+#   * the glob must be "**/*", not "**": under Python 3.12 pathlib's "**" matches only
+#     directories, so "**" silently ships no files.
+include = [
+    { path = "platzky_telegram_notifier/locale/**/*", format = ["sdist", "wheel"] },
+]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+platzky = ">=2.0.0a12,<3.0.0"
+requests = "^2.32"
+
+[tool.poetry.plugins."platzky.plugins"]
+telegram_notifier = "platzky_telegram_notifier:TelegramNotifierPlugin"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.3"
+types-requests = "^2.32"
+black = "^26.3.1"
+ruff = ">=0.14,<1.0"
+pyright = "^1.1.390"
+coverage = "^7.6.9"
+interrogate = "^1.7.0"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+show-fixes = true
+
+[tool.ruff.lint]
+select = [
+    "I",
+    "F",
+    "E",
+    "W",
+    "PT",
+    "RUF",
+]
+
+[tool.pyright]
+pythonVersion = "3.10"
+pythonPlatform = "All"
+typeCheckingMode = "strict"
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportMissingParameterType = true
+reportUnknownArgumentType = true
+reportUnknownMemberType = true
+reportUnknownVariableType = true
+reportUnknownParameterType = true
+reportUnnecessaryTypeIgnoreComment = true
+reportUntypedClassDecorator = false
+reportUntypedFunctionDecorator = false
+reportUnnecessaryIsInstance = false
+reportUnusedFunction = true
+reportUntypedBaseClass = false
+
+[tool.pytest.ini_options]
+markers = [
+    "skip_coverage: skip coverage for this test",
+]
+
+[tool.interrogate]
+fail-under = 95
+ignore-init-method = true
+ignore-init-module = true
+ignore-magic = true
+ignore-private = true
+ignore-semiprivate = false
+exclude = ["tests", "docs"]
+
