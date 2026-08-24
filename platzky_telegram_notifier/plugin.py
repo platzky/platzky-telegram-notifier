@@ -20,9 +20,6 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_RETRY_AFTER = 60.0
 
-# Delay before the first backoff retry; doubled on every further attempt.
-RETRY_BACKOFF_BASE = 1.0
-
 # Bot API hard limits — see https://core.telegram.org/bots/api
 MAX_MESSAGE_LENGTH = 4096
 MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # 50MB
@@ -111,6 +108,22 @@ def chunk_message(text: str, limit: int = MAX_MESSAGE_LENGTH) -> Iterator[str]:
         remaining = remaining[split_at:].lstrip("\n")
 
 
+def _redact(text: str, bot_token: str) -> str:
+    """Blank out the bot token wherever it appears in a message.
+
+    ``requests`` embeds the full request URL — bot token included — in its exception
+    messages, and those messages reach the logs and ``TelegramDeliveryError``.
+
+    Args:
+        text: The message to scrub.
+        bot_token: The token to remove.
+
+    Returns:
+        ``text`` with every occurrence of ``bot_token`` replaced by a placeholder.
+    """
+    return text.replace(bot_token, "<bot_token>")
+
+
 def _retry_after(body: dict[str, Any]) -> float | None:
     """Read Telegram's ``parameters.retry_after`` hint out of a failed response body.
 
@@ -126,7 +139,8 @@ def _retry_after(body: dict[str, Any]) -> float | None:
     value = cast("dict[str, Any]", parameters).get("retry_after")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    # A negative hint would reach time.sleep() and raise ValueError out of notify().
+    return max(0.0, float(value))
 
 
 def _with_retries(
@@ -139,9 +153,9 @@ def _with_retries(
     """Run ``operation``, repeating attempts that fail transiently.
 
     Rate limits (HTTP 429) are retried after the delay Telegram asks for; transport
-    errors and 5xx responses use exponential backoff from ``RETRY_BACKOFF_BASE``. A
-    requested delay above ``max_retry_after`` is not waited out — the call fails
-    instead of blocking the caller for minutes.
+    errors and 5xx responses back off exponentially: 1s, 2s, 4s, … A requested delay
+    above ``max_retry_after`` is not waited out — the call fails instead of blocking
+    the caller for minutes.
 
     Args:
         description: Human-readable name of the operation, used in log messages.
@@ -160,20 +174,26 @@ def _with_retries(
         try:
             return operation()
         except _RetryableError as retryable:
-            delay = retryable.retry_after
-            if delay is None:
-                delay = RETRY_BACKOFF_BASE * (2**attempt)
             if attempt >= max_retries:
                 logger.warning("%s failed after %d attempt(s), giving up", description, attempt + 1)
                 raise retryable.error from retryable.__cause__
-            if delay > max_retry_after:
+
+            requested = retryable.retry_after
+            if requested is None:
+                # Backoff is our own heuristic, so trimming it to the cap is harmless.
+                delay = min(float(2**attempt), max_retry_after)  # 1s, 2s, 4s, …
+            elif requested > max_retry_after:
+                # Retrying sooner than Telegram asked for only earns another rejection.
                 logger.warning(
                     "%s asked to wait %.1fs, above the %.1fs cap; giving up",
                     description,
-                    delay,
+                    requested,
                     max_retry_after,
                 )
                 raise retryable.error from retryable.__cause__
+            else:
+                delay = requested
+
             logger.warning("%s failed (%s); retrying in %.1fs", description, retryable, delay)
             time.sleep(delay)
             attempt += 1
@@ -183,6 +203,7 @@ def _request_once(
     method: str,
     url: str,
     *,
+    bot_token: str,
     timeout: float,
     data: dict[str, Any] | None,
     files: dict[str, tuple[str, bytes, str]] | None,
@@ -192,6 +213,7 @@ def _request_once(
     Args:
         method: Bot API method name, e.g. ``sendMessage``.
         url: Fully built method URL, including the bot token.
+        bot_token: The token to scrub out of any error message.
         timeout: Socket timeout in seconds.
         data: Form fields to send.
         files: Multipart files as ``{field: (filename, content, mime_type)}``.
@@ -208,7 +230,9 @@ def _request_once(
         response = requests.post(url, data=data, files=files, timeout=timeout)
     except requests.RequestException as e:
         raise _RetryableError(
-            TelegramApiError(f"Request to Telegram method '{method}' failed: {e}")
+            TelegramApiError(
+                f"Request to Telegram method '{method}' failed: {_redact(str(e), bot_token)}"
+            )
         ) from e
 
     status_code = response.status_code
@@ -223,9 +247,12 @@ def _request_once(
         raise non_json from e
 
     if not isinstance(payload, dict):
-        raise TelegramApiError(
+        unexpected = TelegramApiError(
             f"Telegram method '{method}' returned an unexpected body (HTTP {status_code})"
         )
+        if status_code >= 500:
+            raise _RetryableError(unexpected)
+        raise unexpected
 
     body = cast("dict[str, Any]", payload)
     if body.get("ok", False):
@@ -277,7 +304,9 @@ def _call(
     logger.debug("Calling Telegram method %s", method)
     return _with_retries(
         f"Telegram method '{method}'",
-        lambda: _request_once(method, url, timeout=timeout, data=data, files=files),
+        lambda: _request_once(
+            method, url, bot_token=bot_token, timeout=timeout, data=data, files=files
+        ),
         max_retries=max_retries,
         max_retry_after=max_retry_after,
     )
@@ -431,10 +460,11 @@ class TelegramNotifierPlugin(NotifierPluginBase):
         default chat; an empty set falls back to ``chat_id`` from the config.
 
         Every target chat is attempted even when an earlier one fails, so one blocked
-        or unknown chat cannot swallow the notification for the rest. A chat whose
-        message text fails is skipped entirely — its attachments are not attempted,
-        since the chat is generally unreachable — while a single failing attachment
-        does not stop the remaining ones.
+        or unknown chat cannot swallow the notification for the rest. A failing message
+        skips the rest of that chat — remaining chunks and all attachments — since the
+        chat is generally unreachable, while a single failing attachment does not stop
+        the remaining ones. A message long enough to be split can therefore be left
+        partially delivered if a later chunk fails.
 
         Args:
             notification: The notification payload to deliver.

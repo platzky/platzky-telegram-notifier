@@ -127,8 +127,21 @@ Transient failures are retried automatically, up to `max_retries` extra attempts
 | HTTP 429 rate limit | yes | whatever `parameters.retry_after` asks for |
 | Any other `ok: false` (400, 403, …) | no | — |
 
-A delay longer than `max_retry_after` is never waited out — the call fails instead of blocking
-the caller for minutes. Set `max_retries` to `0` to turn retries off entirely.
+A delay is capped by `max_retry_after`, but the two sources are treated differently:
+exponential backoff is our own heuristic, so it is **trimmed** to the cap and the full
+`max_retries` budget is still spent; a delay the API explicitly asks for that exceeds the cap
+makes the call **give up**, because retrying sooner than asked only earns another rejection.
+Set `max_retries` to `0` to turn retries off entirely.
+
+> **Retries can duplicate a message.** A read timeout after Telegram has already accepted the
+> send is indistinguishable from a lost request, so a retry may deliver the same text or file
+> twice. There is no idempotency key in the API. Lower `max_retries` if duplicates are worse
+> than a missed notification for your use case.
+
+> **Retries block the caller.** `Engine.notify` runs notifier plugins synchronously, so the
+> worst-case wait is roughly `max_retries × max_retry_after` **per chunk, per chat**, and it
+> delays every notifier registered after this one. The defaults (2 × 60s) are already generous;
+> lower `max_retry_after` if a slow failure is worse than a lost notification.
 
 ### Partial delivery
 

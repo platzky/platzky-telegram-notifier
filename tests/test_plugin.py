@@ -418,7 +418,7 @@ def test_retry_settings_come_from_the_plugin_config(no_sleep: MagicMock) -> None
     assert [call.args[0] for call in no_sleep.call_args_list] == [1.0, 2.0, 4.0, 8.0]
 
 
-def test_backoff_stops_once_it_would_exceed_the_cap(no_sleep: MagicMock) -> None:
+def test_backoff_is_clamped_to_the_cap_without_losing_retries(no_sleep: MagicMock) -> None:
     with patch("platzky_telegram_notifier.plugin.requests.post") as mock_post:
         mock_post.return_value = _error_response(500, description="oops")
         with pytest.raises(TelegramApiError):
@@ -426,12 +426,12 @@ def test_backoff_stops_once_it_would_exceed_the_cap(no_sleep: MagicMock) -> None
                 bot_token=TOKEN,
                 chat_id=CHAT_ID,
                 text="Hello",
-                max_retries=9,
+                max_retries=4,
                 max_retry_after=3.0,
             )
 
-    assert [call.args[0] for call in no_sleep.call_args_list] == [1.0, 2.0]
-    assert mock_post.call_count == 3
+    assert [call.args[0] for call in no_sleep.call_args_list] == [1.0, 2.0, 3.0, 3.0]
+    assert mock_post.call_count == 5
 
 
 # --- partial delivery failures ---------------------------------------------
@@ -518,3 +518,58 @@ def test_notify_raises_nothing_when_every_chat_succeeds() -> None:
         )
 
     assert mock_post.call_count == 2
+
+
+# --- regressions -----------------------------------------------------------
+
+
+def test_the_bot_token_never_reaches_a_transport_error_message() -> None:
+    with patch("platzky_telegram_notifier.plugin.requests.post") as mock_post:
+        mock_post.side_effect = requests.ConnectionError(
+            f"HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries "
+            f"exceeded with url: /bot{TOKEN}/sendMessage"
+        )
+        with pytest.raises(TelegramApiError) as excinfo:
+            send_message(bot_token=TOKEN, chat_id=CHAT_ID, text="Hello", max_retries=0)
+
+    assert TOKEN not in str(excinfo.value)
+    assert "<bot_token>" in str(excinfo.value)
+
+
+def test_the_bot_token_never_reaches_the_retry_logs(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG", logger="platzky.telegram_notifier")
+    plugin = TelegramNotifierPlugin({"bot_token": TOKEN, "chat_id": CHAT_ID, "max_retries": 1})
+    with patch("platzky_telegram_notifier.plugin.requests.post") as mock_post:
+        mock_post.side_effect = requests.ConnectionError(
+            f"Max retries exceeded with url: /bot{TOKEN}/sendMessage"
+        )
+        with pytest.raises(TelegramDeliveryError) as excinfo:
+            plugin.notify(Notification(message="hi", topic="general"))
+
+    assert TOKEN not in caplog.text
+    assert TOKEN not in str(excinfo.value)
+
+
+def test_a_negative_retry_after_does_not_escape_as_a_value_error(no_sleep: MagicMock) -> None:
+    throttled = _error_response(
+        429, error_code=429, description="Too Many Requests", parameters={"retry_after": -1}
+    )
+    plugin = TelegramNotifierPlugin({"bot_token": TOKEN, "chat_id": CHAT_ID})
+    with patch("platzky_telegram_notifier.plugin.requests.post", return_value=throttled):
+        with pytest.raises(TelegramDeliveryError):
+            plugin.notify(Notification(message="hi", topic="general"))
+
+    assert [call.args[0] for call in no_sleep.call_args_list] == [0.0, 0.0]
+
+
+def test_a_non_object_body_on_a_5xx_is_retried(no_sleep: MagicMock) -> None:
+    response = MagicMock()
+    response.status_code = 503
+    response.json.return_value = "upstream unavailable"
+    with patch(
+        "platzky_telegram_notifier.plugin.requests.post", return_value=response
+    ) as mock_post:
+        with pytest.raises(TelegramApiError, match="unexpected body"):
+            send_message(bot_token=TOKEN, chat_id=CHAT_ID, text="Hello")
+
+    assert mock_post.call_count == 3
