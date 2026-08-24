@@ -100,6 +100,8 @@ declares (`security`, `content`, `general`).
 | `timeout` | no | `30` | Socket timeout in seconds |
 | `parse_mode` | no | `null` | `MarkdownV2`, `HTML`, or `Markdown`. Plain text when unset |
 | `disable_notification` | no | `false` | Deliver silently |
+| `max_retries` | no | `2` | Extra attempts after a rate limit, 5xx, or transport failure |
+| `max_retry_after` | no | `60` | Longest rate-limit delay, in seconds, worth waiting out |
 
 Leave `parse_mode` unset unless you control the message text: Telegram rejects a message whose
 markup is malformed, and `MarkdownV2` requires escaping a long list of punctuation characters.
@@ -111,9 +113,44 @@ markup is malformed, and `MarkdownV2` requires escaping a long list of punctuati
 - Messages longer than Telegram's 4096-character limit are split into consecutive messages on
   line boundaries rather than being rejected.
 - Attachments are sent with `sendDocument` after the message text. Anything above the Bot API's
-  50MB document limit raises `AttachmentSizeError` before the request is made.
-- API and transport failures raise `TelegramApiError`. The bot token is part of the request URL
-  and is never logged.
+  50MB document limit is rejected before the request is made.
+- The bot token is part of the request URL and is never logged.
+
+### Retries
+
+Transient failures are retried automatically, up to `max_retries` extra attempts:
+
+| Failure | Retried? | Delay |
+|---|---|---|
+| Transport error (connection reset, timeout) | yes | 1s, then 2s, 4s… |
+| HTTP 5xx | yes | 1s, then 2s, 4s… |
+| HTTP 429 rate limit | yes | whatever `parameters.retry_after` asks for |
+| Any other `ok: false` (400, 403, …) | no | — |
+
+A delay longer than `max_retry_after` is never waited out — the call fails instead of blocking
+the caller for minutes. Set `max_retries` to `0` to turn retries off entirely.
+
+### Partial delivery
+
+Every target chat is attempted even when an earlier one fails, so a single blocked or unknown
+chat cannot swallow the notification for everyone else. Within one chat, a failing message skips
+that chat's attachments too — the chat is generally unreachable — while one failing attachment
+does not stop the remaining ones.
+
+If anything failed, `notify()` raises `TelegramDeliveryError` **after** all chats have been
+attempted. It subclasses `TelegramApiError`, so existing handlers keep working, and its
+`failures` attribute maps each failed chat id to the errors it produced:
+
+```python
+try:
+    engine.notify("Nightly backup failed", topic="security")
+except TelegramDeliveryError as e:
+    for chat_id, errors in e.failures.items():
+        ...
+```
+
+Note that an oversized attachment therefore surfaces as a `TelegramDeliveryError` wrapping the
+`AttachmentSizeError`, rather than raising it directly.
 
 ## Development
 
