@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "platzky_telegram_notifier"
-version = "0.1.0"
+version = "0.2.0"
 description = "Platzky plugin for sending notifications to Telegram"
 authors = ["Krzysztof Kołodziński"]
 license = "MIT"
